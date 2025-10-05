@@ -1,0 +1,10 @@
+rootProject.name = 'arkajvalenzuela'
+
+// Módulos del proyecto
+include 'arca-cotizador'
+include 'arca-gestor-solicitudes'
+include 'eureka-server'
+include 'api-gateway'
+include 'hello-world-service'
+include 'arka-security-common'
+include 'config-server'

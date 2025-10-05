@@ -1,0 +1,343 @@
+version: "3.9"
+
+services:
+  # =================================
+  # Databases & Messaging
+  # =================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: arka-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: arka_db
+      POSTGRES_USER: arka
+      POSTGRES_PASSWORD: arka123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arka -d arka_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: arka-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass arka123
+    volumes:
+      - redis-data:/data
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: arka-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: arka
+      RABBITMQ_DEFAULT_PASS: arka123
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mongodb:
+    image: mongo:7.0
+    container_name: arka-mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: arka_admin
+      MONGO_INITDB_ROOT_PASSWORD: Arca2025*
+      MONGO_INITDB_DATABASE: arka_notifications
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  mongo-express:
+    image: mongo-express:1.0.0
+    container_name: arka-mongo-express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: arka_admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: Arca2025*
+      ME_CONFIG_MONGODB_URL: mongodb://arka_admin:Arca2025*@mongodb:27017/
+      ME_CONFIG_BASICAUTH: false
+    depends_on:
+      - mongodb
+    networks:
+      - arka-network
+
+  # =================================
+  # Config & Discovery
+  # =================================
+  config-server:
+    build:
+      context: .
+      dockerfile: config-server/Dockerfile
+      args:
+        MODULE_NAME: config-server
+    container_name: arka-config-server
+    ports:
+      - "8888:8888"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker,native
+      - SERVER_PORT=8888
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+    volumes:
+      - ./config-repository:/app/config-repository
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  eureka-server:
+    build:
+      context: .
+      dockerfile: eureka-server/Dockerfile
+      args:
+        MODULE_NAME: eureka-server
+    container_name: arka-eureka-server
+    ports:
+      - "8761:8761"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8761
+      - SPRING_CLOUD_CONFIG_URI=http://config-server:8888
+    depends_on:
+      config-server:
+        condition: service_healthy
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8761/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+      args:
+        MODULE_NAME: api-gateway
+    container_name: arka-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8080
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+    depends_on:
+      config-server:
+        condition: service_healthy
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =================================
+  # Business Microservices
+  # =================================
+  gestor-solicitudes:
+    build:
+      context: .
+      dockerfile: arca-gestor-solicitudes/Dockerfile
+      args:
+        MODULE_NAME: arca-gestor-solicitudes
+    container_name: arka-gestor-solicitudes
+    ports:
+      - "8082:8082"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8082
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=arka
+      - SPRING_RABBITMQ_PASSWORD=arka123
+      - SPRING_R2DBC_URL=r2dbc:h2:mem:///gestor_db?options=DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+      - ARKA_SECURITY_JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - ARKA_SECURITY_JWT_EXPIRATION=86400
+      - ARKA_SECURITY_JWT_REFRESH_EXPIRATION=604800
+    depends_on:
+      config-server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - arka-network
+    volumes:
+      - gestor-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  cotizador:
+    build:
+      context: .
+      dockerfile: arca-cotizador/Dockerfile
+      args:
+        MODULE_NAME: arca-cotizador
+    container_name: arka-cotizador
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8083
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+      - SPRING_RABBITMQ_HOST=rabbitmq
+      - SPRING_RABBITMQ_PORT=5672
+      - SPRING_RABBITMQ_USERNAME=arka
+      - SPRING_RABBITMQ_PASSWORD=arka123
+      - SPRING_R2DBC_URL=r2dbc:h2:mem:///cotizador_db?options=DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    depends_on:
+      config-server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - arka-network
+    volumes:
+      - cotizador-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  hello-world-service:
+    build:
+      context: .
+      dockerfile: hello-world-service/Dockerfile
+      args:
+        MODULE_NAME: hello-world-service
+    container_name: arka-hello-world
+    ports:
+      - "8084:8084"
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+      - SERVER_PORT=8084
+      - EUREKA_CLIENT_SERVICE_URL_DEFAULTZONE=http://eureka-server:8761/eureka/
+    depends_on:
+      config-server:
+        condition: service_healthy
+    networks:
+      - arka-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # =================================
+  # Monitoring & Tools
+  # =================================
+  prometheus:
+    image: prom/prometheus:v2.40.0
+    container_name: arka-prometheus
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - arka-network
+
+  grafana:
+    image: grafana/grafana:9.2.0
+    container_name: arka-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    networks:
+      - arka-network
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    container_name: arka-mailhog
+    restart: always
+    ports:
+      - "1025:1025"  # SMTP
+      - "8025:8025"  # Web UI
+    networks:
+      - arka-network
+
+# =================================
+# Networks
+# =================================
+networks:
+  arka-network:
+    driver: bridge
+    name: arka-microservices-network
+
+# =================================
+# Volumes
+# =================================
+volumes:
+  rabbitmq-data:
+  gestor-data:
+  cotizador-data:
+  prometheus-data:
+  grafana-data:
+  postgres-data:
+  redis-data:
+  mongodb_data:
